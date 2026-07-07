@@ -13,7 +13,7 @@ import (
 	"github.com/sqlc-dev/plugin-sdk-go/plugin"
 	"github.com/sqlc-dev/plugin-sdk-go/sdk"
 
-	"github.com/sqlc-dev/sqlc-gen-java/internal/inflection"
+	"github.com/Sineaggi/sqlc-gen-java/internal/inflection"
 )
 
 var javaIdentPattern = regexp.MustCompile("[^a-zA-Z0-9_]+")

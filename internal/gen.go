@@ -1,4 +1,4 @@
-package javagen
+package java
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 	"github.com/sqlc-dev/plugin-sdk-go/plugin"
 	"github.com/sqlc-dev/plugin-sdk-go/sdk"
 
-	"github.com/sqlc-dev/sqlc-gen-java/internal/core"
+	"github.com/Sineaggi/sqlc-gen-java/internal/core"
 )
 
 //go:embed tmpl/javamodel.tmpl
