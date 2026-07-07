@@ -45,7 +45,7 @@ func mysqlType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool) {
 		return "String", false
 
 	case "any":
-		return "Any", false
+		return "Object", false
 
 	default:
 		for _, schema := range req.Catalog.Schemas {
@@ -58,6 +58,6 @@ func mysqlType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool) {
 				}
 			}
 		}
-		return "Any", false
+		return "Object", false
 	}
 }

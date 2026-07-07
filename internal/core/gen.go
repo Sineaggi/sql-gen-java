@@ -13,10 +13,15 @@ import (
 	"github.com/sqlc-dev/plugin-sdk-go/plugin"
 	"github.com/sqlc-dev/plugin-sdk-go/sdk"
 
-	"github.com/sqlc-dev/sqlc-gen-kotlin/internal/inflection"
+	"github.com/sqlc-dev/sqlc-gen-java/internal/inflection"
 )
 
-var ktIdentPattern = regexp.MustCompile("[^a-zA-Z0-9_]+")
+var javaIdentPattern = regexp.MustCompile("[^a-zA-Z0-9_]+")
+
+// EmitNullableAnnotations controls whether nullable types are annotated with
+// org.jspecify.annotations.Nullable. It is set once per Generate() call from
+// the plugin config.
+var EmitNullableAnnotations = true
 
 type Constant struct {
 	Name  string
@@ -33,7 +38,7 @@ type Enum struct {
 type Field struct {
 	ID      int
 	Name    string
-	Type    ktType
+	Type    javaType
 	Comment string
 }
 
@@ -48,7 +53,7 @@ type QueryValue struct {
 	Emit   bool
 	Name   string
 	Struct *Struct
-	Typ    ktType
+	Typ    javaType
 }
 
 func (v QueryValue) EmitStruct() bool {
@@ -60,11 +65,13 @@ func (v QueryValue) IsStruct() bool {
 }
 
 func (v QueryValue) isEmpty() bool {
-	return v.Typ == (ktType{}) && v.Name == "" && v.Struct == nil
+	return v.Typ == (javaType{}) && v.Name == "" && v.Struct == nil
 }
 
+// Type renders the value's declared type, honoring the value's own
+// nullability (used for :many element types, params, and struct fields).
 func (v QueryValue) Type() string {
-	if v.Typ != (ktType{}) {
+	if v.Typ != (javaType{}) {
 		return v.Typ.String()
 	}
 	if v.Struct != nil {
@@ -73,19 +80,43 @@ func (v QueryValue) Type() string {
 	panic("no type for QueryValue: " + v.Name)
 }
 
-func jdbcSet(t ktType, idx int, name string) string {
+// NullableType renders the value's declared type as if it were nullable,
+// regardless of the underlying column's nullability. Used for :one return
+// types, since "no rows found" makes the result nullable no matter what.
+func (v QueryValue) NullableType() string {
+	if v.Struct != nil {
+		return nullableRef(v.Struct.Name)
+	}
+	return v.Typ.declare(true)
+}
+
+func nullableRef(name string) string {
+	if EmitNullableAnnotations {
+		return "@Nullable " + name
+	}
+	return name
+}
+
+func isPrimitiveBacked(name string) bool {
+	switch name {
+	case "Int", "Long", "Short", "Float", "Double", "Boolean":
+		return true
+	}
+	return false
+}
+
+func jdbcSet(t javaType, idx int, name string) string {
 	if t.IsEnum && t.IsArray {
-		return fmt.Sprintf(`stmt.setArray(%d, conn.createArrayOf("%s", %s.map { v -> v.value }.toTypedArray()))`, idx, t.DataType, name)
+		return fmt.Sprintf(`stmt.setArray(%d, conn.createArrayOf("%s", %s.stream().map(v -> v.value()).toArray(String[]::new)))`, idx, t.DataType, name)
 	}
 	if t.IsEnum {
 		if t.Engine == "postgresql" {
-			return fmt.Sprintf("stmt.setObject(%d, %s.value, %s)", idx, name, "Types.OTHER")
-		} else {
-			return fmt.Sprintf("stmt.setString(%d, %s.value)", idx, name)
+			return fmt.Sprintf("stmt.setObject(%d, %s.value(), Types.OTHER)", idx, name)
 		}
+		return fmt.Sprintf("stmt.setString(%d, %s.value())", idx, name)
 	}
 	if t.IsArray {
-		return fmt.Sprintf(`stmt.setArray(%d, conn.createArrayOf("%s", %s.toTypedArray()))`, idx, t.DataType, name)
+		return fmt.Sprintf(`stmt.setArray(%d, conn.createArrayOf("%s", %s.toArray(new %s[0])))`, idx, t.DataType, name, t.boxed())
 	}
 	if t.IsTime() {
 		return fmt.Sprintf("stmt.setObject(%d, %s)", idx, name)
@@ -94,6 +125,14 @@ func jdbcSet(t ktType, idx int, name string) string {
 		return fmt.Sprintf("stmt.setTimestamp(%d, Timestamp.from(%s))", idx, name)
 	}
 	if t.IsUUID() {
+		return fmt.Sprintf("stmt.setObject(%d, %s)", idx, name)
+	}
+	if t.IsBigDecimal() {
+		return fmt.Sprintf("stmt.setBigDecimal(%d, %s)", idx, name)
+	}
+	if t.IsNull && isPrimitiveBacked(t.Name) {
+		// setInt/setLong/etc. take a primitive argument, so a null boxed
+		// value would NPE on autounboxing. setObject accepts null safely.
 		return fmt.Sprintf("stmt.setObject(%d, %s)", idx, name)
 	}
 	return fmt.Sprintf("stmt.set%s(%d, %s)", t.Name, idx, name)
@@ -115,7 +154,7 @@ func (v Params) Args() string {
 	var out []string
 	fields := v.Struct.Fields
 	for _, f := range fields {
-		out = append(out, f.Name+": "+f.Type.String())
+		out = append(out, f.Type.String()+" "+f.Name)
 	}
 	if len(v.binding) > 0 {
 		lookup := map[int]int{}
@@ -140,38 +179,34 @@ func (v Params) Bindings() string {
 	if len(v.binding) > 0 {
 		for i, idx := range v.binding {
 			f := v.Struct.Fields[idx-1]
-			out = append(out, jdbcSet(f.Type, i+1, f.Name))
+			out = append(out, jdbcSet(f.Type, i+1, f.Name)+";")
 		}
 	} else {
 		for i, f := range v.Struct.Fields {
-			out = append(out, jdbcSet(f.Type, i+1, f.Name))
+			out = append(out, jdbcSet(f.Type, i+1, f.Name)+";")
 		}
 	}
 	return indent(strings.Join(out, "\n"), 10, 0)
 }
 
-func jdbcGet(t ktType, idx int) string {
+func jdbcGet(t javaType, idx int) string {
 	if t.IsEnum && t.IsArray {
-		return fmt.Sprintf(`(results.getArray(%d).array as Array<String>).map { v -> %s.lookup(v)!! }.toList()`, idx, t.Name)
+		return fmt.Sprintf(`Arrays.stream((String[]) results.getArray(%d).getArray()).map(v -> Objects.requireNonNull(%s.lookup(v))).collect(Collectors.toList())`, idx, t.Name)
 	}
 	if t.IsEnum {
-		return fmt.Sprintf("%s.lookup(results.getString(%d))!!", t.Name, idx)
+		return fmt.Sprintf("Objects.requireNonNull(%s.lookup(results.getString(%d)))", t.Name, idx)
 	}
 	if t.IsArray {
-		return fmt.Sprintf(`(results.getArray(%d).array as Array<%s>).toList()`, idx, t.Name)
+		return fmt.Sprintf(`Arrays.asList((%s[]) results.getArray(%d).getArray())`, t.boxed(), idx)
 	}
 	if t.IsTime() {
-		return fmt.Sprintf(`results.getObject(%d, %s::class.java)`, idx, t.Name)
+		return fmt.Sprintf(`results.getObject(%d, %s.class)`, idx, t.Name)
 	}
 	if t.IsInstant() {
 		return fmt.Sprintf(`results.getTimestamp(%d).toInstant()`, idx)
 	}
 	if t.IsUUID() {
-		var nullCast string
-		if t.IsNull {
-			nullCast = "?"
-		}
-		return fmt.Sprintf(`results.getObject(%d) as%s %s`, idx, nullCast, t.Name)
+		return fmt.Sprintf(`(UUID) results.getObject(%d)`, idx)
 	}
 	if t.IsBigDecimal() {
 		return fmt.Sprintf(`results.getBigDecimal(%d)`, idx)
@@ -188,7 +223,7 @@ func (v QueryValue) ResultSet() string {
 		out = append(out, jdbcGet(f.Type, i+1))
 	}
 	ret := indent(strings.Join(out, ",\n"), 4, -1)
-	ret = indent(v.Struct.Name+"(\n"+ret+"\n)", 12, 0)
+	ret = indent("new "+v.Struct.Name+"(\n"+ret+"\n)", 12, 0)
 	return ret
 }
 
@@ -225,11 +260,11 @@ type Query struct {
 	Arg          Params
 }
 
-func ktEnumValueName(value string) string {
+func javaEnumValueName(value string) string {
 	id := strings.Replace(value, "-", "_", -1)
 	id = strings.Replace(id, ":", "_", -1)
 	id = strings.Replace(id, "/", "_", -1)
-	id = ktIdentPattern.ReplaceAllString(id, "")
+	id = javaIdentPattern.ReplaceAllString(id, "")
 	return strings.ToUpper(id)
 }
 
@@ -252,7 +287,7 @@ func BuildEnums(req *plugin.GenerateRequest) []Enum {
 			}
 			for _, v := range enum.Vals {
 				e.Constants = append(e.Constants, Constant{
-					Name:  ktEnumValueName(v),
+					Name:  javaEnumValueName(v),
 					Value: v,
 					Type:  e.Name,
 				})
@@ -319,7 +354,11 @@ func BuildDataClasses(conf Config, req *plugin.GenerateRequest) []Struct {
 	return structs
 }
 
-type ktType struct {
+// javaType describes a single column/param/return-value type. Name is the
+// canonical JDBC suffix (e.g. "Int" for getInt/setInt) for the handful of
+// primitive-backed types; for everything else (String, UUID, time types,
+// enums, BigDecimal, Object) Name is just the Java type name.
+type javaType struct {
 	Name     string
 	IsEnum   bool
 	IsArray  bool
@@ -328,52 +367,87 @@ type ktType struct {
 	Engine   string
 }
 
-func (t ktType) String() string {
-	v := t.Name
+// boxed returns the reference-type (boxed) rendering of the type, used for
+// generic type arguments (List<T>) and nullable fields.
+func (t javaType) boxed() string {
+	switch t.Name {
+	case "Int":
+		return "Integer"
+	case "Long":
+		return "Long"
+	case "Short":
+		return "Short"
+	case "Float":
+		return "Float"
+	case "Double":
+		return "Double"
+	case "Boolean":
+		return "Boolean"
+	default:
+		return t.Name
+	}
+}
+
+// primitive returns the primitive rendering of the type and true, or ("",
+// false) if the type has no primitive form.
+func (t javaType) primitive() (string, bool) {
+	switch t.Name {
+	case "Int":
+		return "int", true
+	case "Long":
+		return "long", true
+	case "Short":
+		return "short", true
+	case "Float":
+		return "float", true
+	case "Double":
+		return "double", true
+	case "Boolean":
+		return "boolean", true
+	default:
+		return "", false
+	}
+}
+
+// declare renders the type for a declaration site (field, param, return
+// type) given whether that site is nullable. Arrays are always rendered as
+// List<Boxed> and, matching prior behavior, are never annotated nullable.
+func (t javaType) declare(nullable bool) string {
 	if t.IsArray {
-		v = fmt.Sprintf("List<%s>", v)
-	} else if t.IsNull {
-		v += "?"
+		return fmt.Sprintf("List<%s>", t.boxed())
 	}
-	return v
+	if nullable {
+		return nullableRef(t.boxed())
+	}
+	if p, ok := t.primitive(); ok {
+		return p
+	}
+	return t.boxed()
 }
 
-func (t ktType) jdbcSetter() string {
-	return "set" + t.jdbcType()
+func (t javaType) String() string {
+	return t.declare(t.IsNull)
 }
 
-func (t ktType) jdbcType() string {
-	if t.IsArray {
-		return "Array"
-	}
-	if t.IsEnum || t.IsTime() {
-		return "Object"
-	}
-	if t.IsInstant() {
-		return "Timestamp"
-	}
-	return t.Name
-}
-
-func (t ktType) IsTime() bool {
+func (t javaType) IsTime() bool {
 	return t.Name == "LocalDate" || t.Name == "LocalDateTime" || t.Name == "LocalTime" || t.Name == "OffsetDateTime"
 }
 
-func (t ktType) IsInstant() bool {
+func (t javaType) IsInstant() bool {
 	return t.Name == "Instant"
 }
 
-func (t ktType) IsUUID() bool {
+func (t javaType) IsUUID() bool {
 	return t.Name == "UUID"
 }
 
-func (t ktType) IsBigDecimal() bool {
-	return t.Name == "java.math.BigDecimal"
+func (t javaType) IsBigDecimal() bool {
+	return t.Name == "BigDecimal"
 }
 
-func makeType(req *plugin.GenerateRequest, col *plugin.Column) ktType {
-	typ, isEnum := ktInnerType(req, col)
-	return ktType{
+func makeType(req *plugin.GenerateRequest, col *plugin.Column) javaType {
+	typ, isEnum := javaInnerType(req, col)
+	return javaType{
 		Name:     typ,
 		IsEnum:   isEnum,
 		IsArray:  col.IsArray,
@@ -383,7 +457,7 @@ func makeType(req *plugin.GenerateRequest, col *plugin.Column) ktType {
 	}
 }
 
-func ktInnerType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool) {
+func javaInnerType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool) {
 	// TODO: Extend the engine interface to handle types
 	switch req.Settings.Engine {
 	case "mysql":
@@ -391,7 +465,7 @@ func ktInnerType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool)
 	case "postgresql":
 		return postgresType(req, col)
 	default:
-		return "Any", false
+		return "Object", false
 	}
 }
 
@@ -400,7 +474,7 @@ type goColumn struct {
 	*plugin.Column
 }
 
-func ktColumnsToStruct(req *plugin.GenerateRequest, name string, columns []goColumn, namer func(*plugin.Column, int) string) *Struct {
+func javaColumnsToStruct(req *plugin.GenerateRequest, name string, columns []goColumn, namer func(*plugin.Column, int) string) *Struct {
 	gs := Struct{
 		Name: name,
 	}
@@ -426,7 +500,7 @@ func ktColumnsToStruct(req *plugin.GenerateRequest, name string, columns []goCol
 	return &gs
 }
 
-func ktArgName(name string) string {
+func javaArgName(name string) string {
 	out := ""
 	for i, p := range strings.Split(name, "_") {
 		if i == 0 {
@@ -438,14 +512,14 @@ func ktArgName(name string) string {
 	return out
 }
 
-func ktParamName(c *plugin.Column, number int) string {
+func javaParamName(c *plugin.Column, number int) string {
 	if c.Name != "" {
-		return ktArgName(c.Name)
+		return javaArgName(c.Name)
 	}
 	return fmt.Sprintf("dollar_%d", number)
 }
 
-func ktColumnName(c *plugin.Column, pos int) string {
+func javaColumnName(c *plugin.Column, pos int) string {
 	if c.Name != "" {
 		return c.Name
 	}
@@ -494,7 +568,7 @@ func BuildQueries(req *plugin.GenerateRequest, structs []Struct) ([]Query, error
 			continue
 		}
 		if query.Cmd == metadata.CmdCopyFrom {
-			return nil, errors.New("Support for CopyFrom in Kotlin is not implemented")
+			return nil, errors.New("Support for CopyFrom in Java is not implemented")
 		}
 
 		ql, args := jdbcSQL(query.Text, req.Settings.Engine)
@@ -520,7 +594,7 @@ func BuildQueries(req *plugin.GenerateRequest, structs []Struct) ([]Query, error
 				Column: p.Column,
 			})
 		}
-		params := ktColumnsToStruct(req, gq.ClassName+"Bindings", cols, ktParamName)
+		params := javaColumnsToStruct(req, gq.ClassName+"Bindings", cols, javaParamName)
 		gq.Arg = Params{
 			Struct:  params,
 			binding: refs,
@@ -543,7 +617,7 @@ func BuildQueries(req *plugin.GenerateRequest, structs []Struct) ([]Query, error
 				same := true
 				for i, f := range s.Fields {
 					c := query.Columns[i]
-					sameName := f.Name == memberName(ktColumnName(c, i), req.Settings)
+					sameName := f.Name == memberName(javaColumnName(c, i), req.Settings)
 					sameType := f.Type == makeType(req, c)
 					sameTable := sdk.SameTableName(c.Table, &s.Table, req.Catalog.DefaultSchema)
 
@@ -565,7 +639,7 @@ func BuildQueries(req *plugin.GenerateRequest, structs []Struct) ([]Query, error
 						Column: c,
 					})
 				}
-				gs = ktColumnsToStruct(req, gq.ClassName+"Row", columns, ktColumnName)
+				gs = javaColumnsToStruct(req, gq.ClassName+"Row", columns, javaColumnName)
 				emit = true
 			}
 			gq.Ret = QueryValue{
@@ -581,7 +655,7 @@ func BuildQueries(req *plugin.GenerateRequest, structs []Struct) ([]Query, error
 	return qs, nil
 }
 
-type KtTmplCtx struct {
+type JavaTmplCtx struct {
 	Q           string
 	Package     string
 	Enums       []Enum
@@ -593,17 +667,19 @@ type KtTmplCtx struct {
 	// TODO: Race conditions
 	SourceName string
 
-	EmitJSONTags        bool
-	EmitPreparedQueries bool
-	EmitInterface       bool
+	// Set when rendering a single model/enum file.
+	CurrentEnum   *Enum
+	CurrentStruct *Struct
+
+	EmitNullableAnnotations bool
 }
 
 func Offset(v int) int {
 	return v + 1
 }
 
-func KtFormat(s string) string {
-	// TODO: do more than just skip multiple blank lines, like maybe run ktlint to format
+func JavaFormat(s string) string {
+	// TODO: do more than just skip multiple blank lines, like maybe run google-java-format
 	skipNextSpace := false
 	var lines []string
 	for _, l := range strings.Split(s, "\n") {

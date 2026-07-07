@@ -36,7 +36,7 @@ func postgresType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool
 		return "Float", false
 
 	case "pg_catalog.numeric":
-		return "java.math.BigDecimal", false
+		return "BigDecimal", false
 
 	case "bool", "pg_catalog.bool":
 		return "Boolean", false
@@ -70,17 +70,16 @@ func postgresType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool
 
 	case "inet":
 		// TODO
-		return "net.IP", false
+		return "Object", false
 
 	case "void":
 		// TODO
-		// A void value always returns NULL. Since there is no built-in NULL
-		// value into the SQL package, we'll use sql.NullBool
-		return "sql.NullBool", false
+		// A void value always returns NULL.
+		return "Object", false
 
 	case "any":
 		// TODO
-		return "Any", false
+		return "Object", false
 
 	default:
 		for _, schema := range req.Catalog.Schemas {
@@ -97,6 +96,6 @@ func postgresType(req *plugin.GenerateRequest, col *plugin.Column) (string, bool
 			}
 		}
 		log.Printf("unknown PostgreSQL type: %s\n", columnType)
-		return "Any", false
+		return "Object", false
 	}
 }

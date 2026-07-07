@@ -16,7 +16,7 @@ jobs:
     # - run: go install github.com/sqlc-dev/sqlc/cmd/sqlc@main
     - uses: sqlc-dev/setup-sqlc@v4
       with:
-        sqlc-version: '1.28.0'
-    - run: make
+        sqlc-version: '1.31.1'
+    - run: make all
     - run: sqlc diff
       working-directory: examples

@@ -1,4 +1,4 @@
-package kotlin
+package javagen
 
 import (
 	"bufio"
@@ -6,22 +6,27 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"text/template"
 
 	"github.com/sqlc-dev/plugin-sdk-go/plugin"
 	"github.com/sqlc-dev/plugin-sdk-go/sdk"
-	"github.com/sqlc-dev/sqlc-gen-kotlin/internal/core"
+
+	"github.com/sqlc-dev/sqlc-gen-java/internal/core"
 )
 
-//go:embed tmpl/ktmodels.tmpl
-var ktModelsTmpl string
+//go:embed tmpl/javamodel.tmpl
+var javaModelTmpl string
 
-//go:embed tmpl/ktsql.tmpl
-var ktSqlTmpl string
+//go:embed tmpl/javaenum.tmpl
+var javaEnumTmpl string
 
-//go:embed tmpl/ktiface.tmpl
-var ktIfaceTmpl string
+//go:embed tmpl/javasql.tmpl
+var javaSqlTmpl string
+
+//go:embed tmpl/javaiface.tmpl
+var javaIfaceTmpl string
 
 func Offset(v int) int {
 	return v + 1
@@ -35,6 +40,8 @@ func Generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 		}
 	}
 
+	core.EmitNullableAnnotations = conf.JspecifyAnnotationsEnabled()
+
 	enums := core.BuildEnums(req)
 	structs := core.BuildDataClasses(conf, req)
 	queries, err := core.BuildQueries(req, structs)
@@ -42,12 +49,24 @@ func Generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 		return nil, err
 	}
 
+	// Query row-result types that don't correspond to a table model are
+	// emitted as their own top-level files (Java allows only one public type
+	// per file, and both the Queries interface and QueriesImpl reference them).
+	var rows []*core.Struct
+	for idx := range queries {
+		if queries[idx].Ret.Emit && queries[idx].Ret.Struct != nil {
+			rows = append(rows, queries[idx].Ret.Struct)
+		}
+	}
+
 	i := &core.Importer{
 		Settings:    req.Settings,
 		Enums:       enums,
 		DataClasses: structs,
+		Rows:        rows,
 		Queries:     queries,
 	}
+	core.DefaultImporter = i
 
 	funcMap := template.FuncMap{
 		"lowerTitle": sdk.LowerTitle,
@@ -56,25 +75,28 @@ func Generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 		"offset":     Offset,
 	}
 
-	modelsFile := template.Must(template.New("table").Funcs(funcMap).Parse(ktModelsTmpl))
-	sqlFile := template.Must(template.New("table").Funcs(funcMap).Parse(ktSqlTmpl))
-	ifaceFile := template.Must(template.New("table").Funcs(funcMap).Parse(ktIfaceTmpl))
+	modelFile := template.Must(template.New("model").Funcs(funcMap).Parse(javaModelTmpl))
+	enumFile := template.Must(template.New("enum").Funcs(funcMap).Parse(javaEnumTmpl))
+	sqlFile := template.Must(template.New("sql").Funcs(funcMap).Parse(javaSqlTmpl))
+	ifaceFile := template.Must(template.New("iface").Funcs(funcMap).Parse(javaIfaceTmpl))
 
-	core.DefaultImporter = i
-
-	tctx := core.KtTmplCtx{
-		Settings:    req.Settings,
-		Q:           `"""`,
-		Package:     conf.Package,
-		Queries:     queries,
-		Enums:       enums,
-		DataClasses: structs,
-		SqlcVersion: req.SqlcVersion,
+	baseCtx := core.JavaTmplCtx{
+		Settings:                req.Settings,
+		Q:                       `"""`,
+		Package:                 conf.Package,
+		Queries:                 queries,
+		Enums:                   enums,
+		DataClasses:             structs,
+		SqlcVersion:             req.SqlcVersion,
+		EmitNullableAnnotations: core.EmitNullableAnnotations,
 	}
 
 	output := map[string]string{}
 
-	execute := func(name string, t *template.Template) error {
+	execute := func(name string, t *template.Template, tctx core.JavaTmplCtx) error {
+		if !strings.HasSuffix(name, ".java") {
+			name += ".java"
+		}
 		var b bytes.Buffer
 		w := bufio.NewWriter(&b)
 		tctx.SourceName = name
@@ -83,24 +105,50 @@ func Generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 		if err != nil {
 			return err
 		}
-		if !strings.HasSuffix(name, ".kt") {
-			name += ".kt"
-		}
-		output[name] = core.KtFormat(b.String())
+		output[name] = core.JavaFormat(b.String())
 		return nil
 	}
 
-	if err := execute("Models.kt", modelsFile); err != nil {
+	for idx := range enums {
+		e := enums[idx]
+		ectx := baseCtx
+		ectx.CurrentEnum = &e
+		if err := execute(e.Name, enumFile, ectx); err != nil {
+			return nil, err
+		}
+	}
+
+	for idx := range structs {
+		sctx := baseCtx
+		sctx.CurrentStruct = &structs[idx]
+		if err := execute(structs[idx].Name, modelFile, sctx); err != nil {
+			return nil, err
+		}
+	}
+
+	for idx := range rows {
+		sctx := baseCtx
+		sctx.CurrentStruct = rows[idx]
+		if err := execute(rows[idx].Name, modelFile, sctx); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := execute("Queries", ifaceFile, baseCtx); err != nil {
 		return nil, err
 	}
-	if err := execute("Queries.kt", ifaceFile); err != nil {
-		return nil, err
-	}
-	if err := execute("QueriesImpl.kt", sqlFile); err != nil {
+	if err := execute("QueriesImpl", sqlFile, baseCtx); err != nil {
 		return nil, err
 	}
 
 	resp := plugin.GenerateResponse{}
+
+	if core.EmitNullableAnnotations && conf.Package != "" {
+		resp.Files = append(resp.Files, &plugin.File{
+			Name:     "package-info.java",
+			Contents: []byte(packageInfo(conf.Package)),
+		})
+	}
 
 	for filename, code := range output {
 		resp.Files = append(resp.Files, &plugin.File{
@@ -110,4 +158,13 @@ func Generate(ctx context.Context, req *plugin.GenerateRequest) (*plugin.Generat
 	}
 
 	return &resp, nil
+}
+
+func packageInfo(pkg string) string {
+	return fmt.Sprintf(`// Code generated by sqlc. DO NOT EDIT.
+@NullMarked
+package %s;
+
+import org.jspecify.annotations.NullMarked;
+`, pkg)
 }
