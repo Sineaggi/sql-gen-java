@@ -42,8 +42,8 @@ sql:
 When `emit_jspecify_annotations` is enabled you need JSpecify on the compile
 classpath (it is compile-only — CLASS retention, not required at runtime):
 
-```groovy
-compileOnly 'org.jspecify:jspecify:1.0.0'
+```kotlin
+compileOnly("org.jspecify:jspecify:1.0.0")
 ```
 
 ## Building locally
