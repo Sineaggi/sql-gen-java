@@ -108,7 +108,7 @@ class QueriesImpl(private val conn: Connection) : Queries {
       if (!results.next()) {
           throw SQLException("no generated key returned")
       }
-	  results.getLong(1)
+      results.getLong(1)
     }
   }
 {{end}}
