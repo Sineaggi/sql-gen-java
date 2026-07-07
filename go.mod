@@ -3,7 +3,7 @@ module github.com/sqlc-dev/sqlc-gen-kotlin
 go 1.19
 
 require (
-	github.com/jinzhu/inflection v1.0.0
+	github.com/jinzhu/inflection v1.0.1-0.20231016084002-bbe0a3e7399f
 	github.com/sqlc-dev/plugin-sdk-go v1.23.0
 )
 
