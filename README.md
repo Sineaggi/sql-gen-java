@@ -19,7 +19,7 @@ plugins:
 - name: java
   wasm:
     url: https://github.com/Sineaggi/sql-gen-java/releases/download/v0.1.0/sqlc-gen-java.wasm
-    sha256: "" # see the sha256 published in that release's notes
+    sha256: 069456ae51931e1e5d829e248f020d3d68b4b812b9f36580d9377c68924b2786
 sql:
 - schema: src/main/resources/authors/postgresql/schema.sql
   queries: src/main/resources/authors/postgresql/query.sql
@@ -49,7 +49,8 @@ compileOnly("org.jspecify:jspecify:1.0.0")
 ## Building locally
 
 ```shell
-make all            # builds bin/sqlc-gen-java and bin/sqlc-gen-java.wasm
+# builds bin/sqlc-gen-java and bin/sqlc-gen-java.wasm
+make all
 ```
 
 To run against a local build, point `wasm.url` at the file (the `sha256` may be

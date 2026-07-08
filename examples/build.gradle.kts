@@ -2,8 +2,8 @@ plugins {
     id("java")
 }
 
-group = 'com.example'
-version = '1.0-SNAPSHOT'
+group = "com.example"
+version = "1.0-SNAPSHOT"
 
 repositories {
     mavenCentral()
@@ -17,12 +17,12 @@ dependencies {
 
 testing {
     suites {
-        test {
+        named<JvmTestSuite>("test") {
             useJUnitJupiter("6.1.1")
         }
     }
 }
 
-tasks.withType(JavaCompile).configureEach {
+tasks.withType<JavaCompile>().configureEach {
     options.release = 17
 }

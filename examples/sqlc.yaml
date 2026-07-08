@@ -2,7 +2,8 @@ version: '2'
 plugins:
 - name: java
   wasm:
-    url: file://../bin/sqlc-gen-java.wasm
+    url: https://github.com/Sineaggi/sql-gen-java/releases/download/v0.1.0/sqlc-gen-java.wasm
+    sha256: 069456ae51931e1e5d829e248f020d3d68b4b812b9f36580d9377c68924b2786
 sql:
 - schema: src/main/resources/authors/postgresql/schema.sql
   queries: src/main/resources/authors/postgresql/query.sql

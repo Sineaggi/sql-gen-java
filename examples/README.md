@@ -24,5 +24,5 @@ The project can be easily imported into IntelliJ IDEA:
 1. Install a JDK 17+ if you don't already have one
 1. Download IntelliJ IDEA Community Edition
 1. In the "Welcome" modal, click "Import Project"
-1. Open the `build.gradle` file adjacent to this README file
+1. Open the `build.gradle.kts` file adjacent to this README file
 1. Wait for IntelliJ to sync the gradle modules and complete indexing
